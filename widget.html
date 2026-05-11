@@ -187,6 +187,19 @@
     border-color: rgba(255, 77, 77, 0.2);
   }
 
+  /* === Reset Controls === */
+  .reset-controls {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    margin-bottom: 20px;
+  }
+  .reset-controls .btn {
+    padding: 8px 18px;
+    font-size: 12px;
+    min-width: 80px;
+  }
+
   /* === Custom Time === */
   .settings-row {
     display: flex;
@@ -343,7 +356,10 @@
   <div class="controls">
     <button class="btn btn-primary" id="mainBtn">开始</button>
     <button class="btn btn-secondary" id="pauseBtn">暂停</button>
-    <button class="btn btn-danger" id="resetBtn">重置</button>
+  </div>
+  <div class="controls reset-controls">
+    <button class="btn btn-secondary" id="resetWorkBtn">重置为工作</button>
+    <button class="btn btn-secondary" id="resetRestBtn">重置为休息</button>
   </div>
 
   <!-- 自定义时间设置 -->
@@ -378,6 +394,8 @@ const STATE = {
   running: false,
   paused: false,
   interval: null,
+  endTime: 0,            // absolute end timestamp (ms) for sleep-resistant timing
+  wakeLock: null,        // screen wake lock reference
   cycleCount: 0,         // completed work sessions this cycle
 };
 
@@ -393,7 +411,8 @@ const progressRing = document.getElementById('progressRing');
 const cycleBar    = document.getElementById('cycleBar');
 const mainBtn     = document.getElementById('mainBtn');
 const pauseBtn    = document.getElementById('pauseBtn');
-const resetBtn    = document.getElementById('resetBtn');
+const resetWorkBtn = document.getElementById('resetWorkBtn');
+const resetRestBtn = document.getElementById('resetRestBtn');
 const workInput   = document.getElementById('workInput');
 const restInput   = document.getElementById('restInput');
 const applyBtn    = document.getElementById('applyBtn');
@@ -473,7 +492,8 @@ function updateCycleBar() {
 
 // ======== Timer Logic ========
 function tick() {
-  STATE.timeLeft--;
+  // Use wall-clock time so sleep/interval drift doesn't break accuracy
+  STATE.timeLeft = Math.max(0, Math.round((STATE.endTime - Date.now()) / 1000));
   updateTimerUI();
 
   if (STATE.timeLeft <= 0) {
@@ -504,10 +524,12 @@ function startTimer() {
   if (STATE.interval) return;
   STATE.running = true;
   STATE.paused = false;
+  STATE.endTime = Date.now() + STATE.timeLeft * 1000;
   STATE.interval = setInterval(tick, 1000);
   mainBtn.textContent = '工作中';
   if (STATE.phase === 'rest') mainBtn.textContent = '休息中';
   updateSubLabel();
+  requestWakeLock();
 }
 
 function pauseTimer() {
@@ -516,17 +538,22 @@ function pauseTimer() {
   STATE.paused = true;
   clearInterval(STATE.interval);
   STATE.interval = null;
+  // Sync timeLeft from wall clock before stopping
+  STATE.timeLeft = Math.max(0, Math.round((STATE.endTime - Date.now()) / 1000));
   mainBtn.textContent = '继续';
   updateSubLabel();
+  releaseWakeLock();
 }
 
 function resumeTimer() {
   if (STATE.paused) {
     STATE.running = true;
     STATE.paused = false;
+    STATE.endTime = Date.now() + STATE.timeLeft * 1000;
     STATE.interval = setInterval(tick, 1000);
     mainBtn.textContent = STATE.phase === 'work' ? '工作中' : '休息中';
     updateSubLabel();
+    requestWakeLock();
   }
 }
 
@@ -535,20 +562,50 @@ function stopTimer() {
   STATE.paused = false;
   clearInterval(STATE.interval);
   STATE.interval = null;
+  releaseWakeLock();
 }
 
-function resetTimer() {
-  const wasRunning = STATE.running || STATE.paused;
+function resetToWork() {
   stopTimer();
   stopAlarm();
   hideModal();
-  STATE.timeLeft = STATE.totalTime;
-  if (wasRunning) {
-    mainBtn.textContent = '开始';
-  }
+  STATE.phase = 'work';
+  STATE.totalTime = STATE.workDuration;
+  STATE.timeLeft = STATE.workDuration;
+  mainBtn.textContent = '开始';
   timerDisplay.classList.remove('warning');
-  updateTimerUI();
+  updateAllUI();
   updateSubLabel();
+}
+
+function resetToRest() {
+  stopTimer();
+  stopAlarm();
+  hideModal();
+  STATE.phase = 'rest';
+  STATE.totalTime = STATE.restDuration;
+  STATE.timeLeft = STATE.restDuration;
+  mainBtn.textContent = '开始';
+  timerDisplay.classList.remove('warning');
+  updateAllUI();
+  updateSubLabel();
+}
+
+// ======== Wake Lock (prevent sleep while timer is active) ========
+function requestWakeLock() {
+  if ('wakeLock' in navigator && !STATE.wakeLock) {
+    navigator.wakeLock.request('display').then(lock => {
+      STATE.wakeLock = lock;
+      lock.addEventListener('release', () => { STATE.wakeLock = null; });
+    }).catch(() => {});
+  }
+}
+
+function releaseWakeLock() {
+  if (STATE.wakeLock) {
+    STATE.wakeLock.release().catch(() => {});
+    STATE.wakeLock = null;
+  }
 }
 
 // ======== Alarm Sound (looping until dismissed) ========
@@ -556,11 +613,14 @@ let alarmInterval = null;
 let alarmCtx = null;
 
 function playAlarm() {
+  requestWakeLock();
   try {
     alarmCtx = new (window.AudioContext || window.webkitAudioContext)();
 
     function blast() {
       if (!alarmCtx) return;
+      // Resume context if suspended after display sleep
+      if (alarmCtx.state === 'suspended') alarmCtx.resume();
       const now = alarmCtx.currentTime;
 
       // Harsh square wave + higher volume for attention
@@ -585,6 +645,7 @@ function playAlarm() {
 }
 
 function stopAlarm() {
+  releaseWakeLock();
   if (alarmInterval) {
     clearInterval(alarmInterval);
     alarmInterval = null;
@@ -655,7 +716,8 @@ mainBtn.addEventListener('click', () => {
 
 pauseBtn.addEventListener('click', pauseTimer);
 
-resetBtn.addEventListener('click', resetTimer);
+resetWorkBtn.addEventListener('click', resetToWork);
+resetRestBtn.addEventListener('click', resetToRest);
 
 applyBtn.addEventListener('click', () => {
   const w = parseInt(workInput.value) || 20;
@@ -663,9 +725,10 @@ applyBtn.addEventListener('click', () => {
   STATE.workDuration = Math.max(60, w * 60);   // at least 1 min
   STATE.restDuration = Math.max(60, r * 60);
 
-  // reset current phase with new duration
   const wasRunning = STATE.running || STATE.paused;
   stopTimer();
+  stopAlarm();
+  hideModal();
   STATE.totalTime = STATE.phase === 'work' ? STATE.workDuration : STATE.restDuration;
   STATE.timeLeft = STATE.totalTime;
   timerDisplay.classList.remove('warning');
