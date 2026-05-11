@@ -258,6 +258,57 @@
     animation: pulse-glow 1.5s ease infinite;
     color: #ff9f43;
   }
+
+  /* === Alarm Modal === */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    z-index: 1000;
+    justify-content: center;
+    align-items: center;
+    -webkit-app-region: no-drag;
+  }
+  .modal-overlay.active { display: flex; }
+
+  .modal-dialog {
+    background: rgba(30, 30, 40, 0.95);
+    backdrop-filter: blur(40px);
+    -webkit-backdrop-filter: blur(40px);
+    border-radius: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 40px 36px 32px;
+    text-align: center;
+    width: 300px;
+    box-shadow: 0 32px 64px rgba(0, 0, 0, 0.5);
+    animation: fadeIn 0.3s ease;
+  }
+
+  .modal-title {
+    font-size: 28px;
+    font-weight: 300;
+    letter-spacing: 4px;
+    margin-bottom: 8px;
+  }
+  .modal-title.work-done { color: #ff9f43; }
+  .modal-title.rest-done { color: #2ed573; }
+
+  .modal-sub {
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.4);
+    letter-spacing: 2px;
+    margin-bottom: 28px;
+  }
+
+  .modal-btn {
+    min-width: 140px;
+    padding: 12px 32px;
+    font-size: 15px;
+  }
 </style>
 </head>
 <body>
@@ -304,6 +355,15 @@
     <input class="time-input" type="number" id="restInput" value="5" min="1" max="60">
     <span class="time-unit">分</span>
     <button class="apply-btn" id="applyBtn">应用</button>
+  </div>
+</div>
+
+<!-- Alarm Modal -->
+<div class="modal-overlay" id="alarmModal">
+  <div class="modal-dialog">
+    <div class="modal-title" id="modalTitle">工作完成</div>
+    <div class="modal-sub" id="modalSub">该休息一下了</div>
+    <button class="btn btn-primary modal-btn" id="dismissBtn">关闭提示</button>
   </div>
 </div>
 
@@ -417,18 +477,11 @@ function tick() {
   updateTimerUI();
 
   if (STATE.timeLeft <= 0) {
-    // time's up — switch phase
-    const wasWork = STATE.phase === 'work';
     stopTimer();
 
-    playGentleSound(wasWork);
-
-    if (wasWork) {
-      STATE.cycleCount++;
-      switchPhase('rest');
-    } else {
-      switchPhase('work');
-    }
+    if (STATE.phase === 'work') STATE.cycleCount++;
+    playAlarm();
+    showModal(STATE.phase === 'work');
   }
 }
 
@@ -487,6 +540,8 @@ function stopTimer() {
 function resetTimer() {
   const wasRunning = STATE.running || STATE.paused;
   stopTimer();
+  stopAlarm();
+  hideModal();
   STATE.timeLeft = STATE.totalTime;
   if (wasRunning) {
     mainBtn.textContent = '开始';
@@ -496,44 +551,88 @@ function resetTimer() {
   updateSubLabel();
 }
 
-// ======== Gentle Sound ========
-function playGentleSound(wasWork) {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+// ======== Alarm Sound (looping until dismissed) ========
+let alarmInterval = null;
+let alarmCtx = null;
 
-    if (wasWork) {
-      // work → rest: gentle chime up — 3 ascending soft tones
-      [523.25, 659.25, 783.99].forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain); gain.connect(ctx.destination);
+function playAlarm() {
+  try {
+    alarmCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    function blast() {
+      if (!alarmCtx) return;
+      const now = alarmCtx.currentTime;
+
+      // Harsh square wave + higher volume for attention
+      [880, 660].forEach((freq, i) => {
+        const osc = alarmCtx.createOscillator();
+        const gain = alarmCtx.createGain();
+        osc.connect(gain); gain.connect(alarmCtx.destination);
         osc.frequency.value = freq;
-        osc.type = 'sine';
-        const t = ctx.currentTime + i * 0.25;
+        osc.type = 'square';
+        const t = now + i * 0.2;
         gain.gain.setValueAtTime(0, t);
-        gain.gain.linearRampToValueAtTime(0.12, t + 0.05);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+        gain.gain.linearRampToValueAtTime(0.35, t + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
         osc.start(t);
-        osc.stop(t + 0.4);
-      });
-    } else {
-      // rest → work: gentle chime down — 2 soft descending tones
-      [659.25, 523.25].forEach((freq, i) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain); gain.connect(ctx.destination);
-        osc.frequency.value = freq;
-        osc.type = 'sine';
-        const t = ctx.currentTime + i * 0.3;
-        gain.gain.setValueAtTime(0, t);
-        gain.gain.linearRampToValueAtTime(0.10, t + 0.05);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
-        osc.start(t);
-        osc.stop(t + 0.5);
+        osc.stop(t + 0.45);
       });
     }
+
+    blast();
+    alarmInterval = setInterval(blast, 700);
   } catch(e) { /* silent fallback */ }
 }
+
+function stopAlarm() {
+  if (alarmInterval) {
+    clearInterval(alarmInterval);
+    alarmInterval = null;
+  }
+  if (alarmCtx) {
+    alarmCtx.close().catch(() => {});
+    alarmCtx = null;
+  }
+}
+
+// ======== Alarm Modal ========
+const alarmModal = document.getElementById('alarmModal');
+const modalTitle = document.getElementById('modalTitle');
+const modalSub = document.getElementById('modalSub');
+const dismissBtn = document.getElementById('dismissBtn');
+
+function showModal(wasWork) {
+  if (wasWork) {
+    modalTitle.textContent = '工作完成';
+    modalTitle.className = 'modal-title work-done';
+    modalSub.textContent = '该休息一下了';
+    dismissBtn.className = 'btn btn-primary modal-btn rest-btn';
+  } else {
+    modalTitle.textContent = '休息结束';
+    modalTitle.className = 'modal-title rest-done';
+    modalSub.textContent = '该继续工作了';
+    dismissBtn.className = 'btn btn-primary modal-btn';
+  }
+  alarmModal.classList.add('active');
+}
+
+function hideModal() {
+  alarmModal.classList.remove('active');
+}
+
+dismissBtn.addEventListener('click', () => {
+  stopAlarm();
+  hideModal();
+
+  const goingToRest = STATE.phase === 'work';
+  if (goingToRest) {
+    // was in work phase, modal was shown, now switch to rest
+    switchPhase('rest');
+  } else {
+    // was in rest phase, modal was shown, now switch to work
+    switchPhase('work');
+  }
+});
 
 // ======== Full UI Sync ========
 function updateAllUI() {
